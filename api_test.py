@@ -1088,17 +1088,43 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             payment_data = seller_proposal.get('payment') or {}
             if payment_data and payment_data.get('__typename') == 'FilledPaymentTerms':
                 payment_methods = payment_data.get('availablePaymentLines') or []
+                # Walk every available payment line and keep the first one
+                # that actually has a usable identifier. Previously this
+                # broke on the FIRST entry with a paymentMethodIdentifier
+                # even if its name/extensibilityDisplayName were both
+                # missing/None — that left payment_identifier set (so
+                # checkout still proceeded to a real submit) while gateway
+                # silently stayed "UNKNOWN" and total_price stayed "0.00",
+                # producing a misleading UNKNOWN/$0.00/CARD_DECLINED result.
                 for method in payment_methods:
                     payment_method = method.get('paymentMethod', {})
-                    if payment_method.get('name') or payment_method.get('paymentMethodIdentifier'):
-                        payment_identifier = payment_method.get('paymentMethodIdentifier')
-                        displayName = payment_method.get('extensibilityDisplayName') or payment_method.get('name', 'Unknown')
-                        
-                        gateway = payment_method.get('extensibilityDisplayName') or payment_method.get('name', 'UNKNOWN')
-                        total_price = f"{round(float(running_total) + shipping_amount + tax_amount, 2):.2f}"
+                    candidate_identifier = payment_method.get('paymentMethodIdentifier')
+                    if not candidate_identifier:
+                        continue
 
+                    candidate_gateway = (
+                        payment_method.get('extensibilityDisplayName')
+                        or payment_method.get('name')
+                        or payment_method.get('displayName')
+                        or ''
+                    ).strip()
+
+                    payment_identifier = candidate_identifier
+                    if candidate_gateway:
+                        gateway = candidate_gateway
+                        total_price = f"{round(float(running_total) + shipping_amount + tax_amount, 2):.2f}"
                         break
-            
+                    # No usable name on this entry — keep payment_identifier
+                    # as a fallback (so checkout can still proceed) but keep
+                    # looking for a later entry with a real gateway name.
+
+                # If we only ever found an identifier with no name, at
+                # least compute a real price instead of leaving it at 0.00 —
+                # the gateway name genuinely wasn't provided by the site,
+                # but the price we can still compute ourselves.
+                if payment_identifier and gateway == "UNKNOWN":
+                    total_price = f"{round(float(running_total) + shipping_amount + tax_amount, 2):.2f}"
+
             if not payment_identifier:
                 return False, "No valid payment method found", gateway, total_price, currency
             
